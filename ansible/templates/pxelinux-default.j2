@@ -4,4 +4,4 @@ DEFAULT install
 LABEL install
   KERNEL linux
   INITRD initrd
-  APPEND root=/dev/ram0 ramdisk_size=4000000 ip=dhcp iso-url=http://{{ pxe_ip }}/srv/images/{{ iso_file }} autoinstall ds=nocloud-net;s=http://{{ pxe_ip }}/srv/ks/ console=tty0 console=ttyS0,115200n8
+  APPEND root=/dev/ram0 ramdisk_size=5000000 ip=dhcp iso-url=http://{{ pxe_ip }}/srv/images/{{ iso_file }} autoinstall ds=nocloud-net;s=http://{{ pxe_ip }}/srv/ks/ console=tty0 console=ttyS0,115200n8
