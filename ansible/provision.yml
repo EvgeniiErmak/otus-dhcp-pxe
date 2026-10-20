@@ -184,3 +184,10 @@
       loop:
         - dnsmasq
         - apache2
+
+    # ---------- 7. UEFI (задание со звёздочкой) ----------
+    - name: UEFI PXE menu (grub/grub.cfg)
+      ansible.builtin.template:
+        src: templates/grub.cfg.j2
+        dest: "{{ tftp_root }}/amd64/grub/grub.cfg"
+        mode: "0644"

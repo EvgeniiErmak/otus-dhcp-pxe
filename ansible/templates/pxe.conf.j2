@@ -8,6 +8,7 @@ dhcp-range={{ dhcp_range_start }},{{ dhcp_range_end }},255.255.255.0,12h
 dhcp-boot=pxelinux.0
 # Загрузчик для UEFI
 dhcp-match=set:efi-x86_64,option:client-arch,7
+dhcp-match=set:efi-x86_64,option:client-arch,9
 dhcp-boot=tag:efi-x86_64,bootx64.efi
 # TFTP-сервер
 enable-tftp
