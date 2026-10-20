@@ -86,3 +86,54 @@ ssh otus@10.0.0.1xx
 - **UEFI\*:** Ubuntu 24.04.5 установлена автоматически по сети, загружается в режиме UEFI (`/boot/efi`, shim + grub-efi).
 
 Скриншоты — в папке [screenshots/](screenshots/).
+
+## Ход выполнения (пояснения к скриншотам)
+
+Скриншоты в папке [screenshots/](screenshots/) идут в порядке выполнения. Ниже — что происходило на каждом этапе, включая ошибки и их исправление.
+
+### 1. Подготовка и репозиторий
+- Проверка хоста: Ubuntu 26.04, AMD Ryzen 9 (AMD-V), 12 ГБ ОЗУ, установлены VirtualBox, Vagrant, Ansible, git.
+- Настройка git, создание структуры проекта, скрипт `git_push.sh`.
+- Создание репозитория на GitHub через API с Personal access token (classic) и первый push.
+
+### 2. PXE-сервер (Vagrant + Ansible)
+- Создание `/etc/vbox/networks.conf`: VirtualBox 7.x без него запрещает адреса 192.168.50.x и 10.0.0.x.
+- Vagrantfile, inventory, плейбук и шаблоны; `--syntax-check`, `vagrant validate`.
+- `vagrant up pxeserver`: Ansible ставит dnsmasq и apache2, скачивает netboot и ISO Ubuntu 24.04.5 (с проверкой SHA256).
+- Проверки: службы `active`, порты 67/69/80, файлы TFTP, ISO и `user-data` отдаются по HTTP (`200 OK`), `pxelinux.0` скачивается по TFTP.
+- **Исправление:** ISO 24.04.5 весит 3.9 ГБ, а не 2.6 ГБ, как в методичке, поэтому `ramdisk_size` увеличен до 5000000.
+
+### 3. BIOS-клиент
+- `vagrant up pxeclient` заканчивается таймаутом SSH. Это ожидаемо: клиент грузится по сети.
+- Лог dnsmasq: DHCP (`DHCPDISCOVER/OFFER/REQUEST/ACK`), TFTP `pxelinux.0`, `default`, `linux`, `initrd`.
+- **Ошибка:** `wget: can't connect to remote host (10.0.0.20): Connection timed out` → `Unable to find a live file system on the network`.
+  Причина: у клиента две сетевые карты, initramfs взял адрес на NAT-интерфейсе (`enp0s8`, 10.0.3.15) и не видел сервер.
+  **Исправление:** в `pxelinux.cfg/default` указан интерфейс `ip=:::::enp0s3:dhcp`.
+- Повторная загрузка: ISO скачан по HTTP, автоустановка (`subiquity/Install`, LVM, grub, openssh), `Power down`.
+- Ручной шаг: загрузка с диска (`--boot1 disk`), клиент получил адрес с hostname `linux`.
+- Вход `otus/123`: Ubuntu 24.04.5 LTS, LVM, адрес на `enp0s3`.
+- Обновление README и push.
+
+### 4. UEFI-клиент (задание со звёздочкой)
+- Добавлены ВМ `pxeclient-uefi` (EFI), шаблон `grub.cfg`, задача в плейбуке, `client-arch 9` в dnsmasq.
+- **Проблема:** клиент пишет `Start PXE over IPv4` → `PXE-E18: Server response timeout`, а в логе dnsmasq пусто.
+- **Диагностика** (несколько скриншотов):
+  - снимок экрана ВМ (`VBoxManage screenshotpng`): `PXE-E18`, `PXE-E16`, `No bootable option`;
+  - `tcpdump` на сервере: `0 packets captured`;
+  - смена карты virtio ↔ Intel e1000, отключение `LinkUpDelay`: без изменений;
+  - `VBox.log`: карта подключена к `pxenet`, EFI-драйверы сети загружены;
+  - запись трафика на карте ВМ (`--nictrace1`): прошивка отправляет только IPv6, DHCP по IPv4 нет;
+  - попытки через iPXE: `ipxe.efi` завис; `snponly.efi` не видит сетевых карт; `ipxe.efi` через SNP: `No configuration methods succeeded`, `TX:0`;
+  - ошибка запуска `Failed to get MAC address (VERR_CFGM_VALUE_NOT_FOUND)`: осталась настройка `LinkUpDelay` от e1000 при карте virtio, удалена;
+  - контрольный опыт: та же ВМ `pxeclient` в BIOS получает DHCP, а после переключения в UEFI — `0 packets`.
+- **Причина:** сеть в режиме UEFI не работает в сборке VirtualBox из репозитория Ubuntu (`virtualbox 7.2.6-dfsg`).
+- **Исправление:** пакет Ubuntu удалён, установлен VirtualBox **7.2.20 от Oracle** (модули ядра собраны, ВМ сохранились).
+- Проверка после замены: пакеты из UEFI-клиента доходят до сервера. На `pxeclient-uefi` (virtio):
+  DHCP `PXEClient:Arch:00007` → `bootx64.efi` (shim) → `grubx64.efi` → `grub/grub.cfg` → `linux` → `initrd`.
+  Чёрный экран ВМ нормален: вывод GRUB и ядра идёт в serial-консоль (`pxeclient-uefi-serial.log`).
+- **Проблема:** через virtio ISO скачивался со скоростью ~300 КБ/с (ETA больше 3 часов).
+  С картами Intel (82540EM, 82545EM) прошивка UEFI не создаёт PXE-пункт: `No bootable option or device was found`.
+  **Исправление:** NIC1 virtio — для PXE-загрузки прошивки, NIC3 Intel e1000 в `pxenet` — для скачивания ISO (`ip=:::::enp0s9:dhcp` в `grub.cfg`).
+- Результат: меню GRUB `Ubuntu 24.04 autoinstall (UEFI, HTTP)`, быстрое скачивание ISO, автоустановка с `efibootmgr`, `grub-efi-amd64`, `shim-signed`, `Power down`.
+- Загрузка с диска, вход `otus/123`: `BOOT MODE: UEFI`, раздел `vfat` в `/boot/efi`, Ubuntu 24.04.5 LTS.
+- Итоговый Vagrantfile с рабочей конфигурацией UEFI-клиента, обновление README, push.
