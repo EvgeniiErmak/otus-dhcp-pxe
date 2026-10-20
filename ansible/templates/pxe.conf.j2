@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+# Интерфейс, на котором работает DHCP/TFTP
+interface={{ pxe_iface }}
+bind-interfaces
+# Диапазон адресов DHCP
+dhcp-range={{ dhcp_range_start }},{{ dhcp_range_end }},255.255.255.0,12h
+# Загрузчик для Legacy BIOS
+dhcp-boot=pxelinux.0
+# Загрузчик для UEFI
+dhcp-match=set:efi-x86_64,option:client-arch,7
+dhcp-boot=tag:efi-x86_64,bootx64.efi
+# TFTP-сервер
+enable-tftp
+tftp-root={{ tftp_root }}/amd64
+# Подробный лог DHCP (journalctl -u dnsmasq)
+log-dhcp

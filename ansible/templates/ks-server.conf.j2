@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+<VirtualHost {{ pxe_ip }}:80>
+    DocumentRoot /
+    # Файлы автоматической установки (user-data, meta-data)
+    <Directory {{ ks_dir }}>
+        Options Indexes MultiViews
+        AllowOverride All
+        Require all granted
+    </Directory>
+    # ISO-образ Ubuntu 24.04
+    <Directory {{ iso_dir }}>
+        Options Indexes MultiViews
+        AllowOverride All
+        Require all granted
+    </Directory>
+</VirtualHost>

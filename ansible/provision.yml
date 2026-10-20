@@ -1,0 +1,186 @@
+---
+# Настройка PXE-сервера: DHCP + TFTP (dnsmasq), HTTP (apache2),
+# загрузчик pxelinux, autoinstall Ubuntu 24.04 (user-data).
+- name: Configure PXE server
+  hosts: pxeserver
+  become: true
+
+  vars:
+    pxe_ip: 10.0.0.20
+    dhcp_range_start: 10.0.0.100
+    dhcp_range_end: 10.0.0.120
+    ubuntu_release_url: https://releases.ubuntu.com/24.04
+    tftp_root: /srv/tftp
+    iso_dir: /srv/images
+    iso_file: noble-live-server-amd64.iso
+    ks_dir: /srv/ks
+
+  handlers:
+    - name: restart dnsmasq
+      ansible.builtin.systemd:
+        name: dnsmasq
+        state: restarted
+
+    - name: restart apache2
+      ansible.builtin.systemd:
+        name: apache2
+        state: restarted
+
+  tasks:
+    # ---------- 0. Подготовка ----------
+    - name: Stop and disable ufw
+      ansible.builtin.systemd:
+        name: ufw
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Detect PXE interface (has {{ pxe_ip }})
+      ansible.builtin.set_fact:
+        pxe_iface: >-
+          {{ ansible_facts | dict2items
+             | selectattr('value.ipv4.address', 'defined')
+             | selectattr('value.ipv4.address', 'equalto', pxe_ip)
+             | map(attribute='value.device') | first }}
+
+    - name: Show PXE interface
+      ansible.builtin.debug:
+        msg: "PXE interface: {{ pxe_iface }} ({{ pxe_ip }})"
+
+    - name: Create directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - /etc/dnsmasq.d
+        - "{{ tftp_root }}"
+        - "{{ iso_dir }}"
+        - "{{ ks_dir }}"
+
+    # ---------- 1. DHCP + TFTP (dnsmasq) ----------
+    # Конфиг кладём ДО установки пакета: с bind-interfaces dnsmasq
+    # не конфликтует с systemd-resolved на 127.0.0.53:53
+    - name: Configure dnsmasq (DHCP + TFTP)
+      ansible.builtin.template:
+        src: templates/pxe.conf.j2
+        dest: /etc/dnsmasq.d/pxe.conf
+        mode: "0644"
+      notify: restart dnsmasq
+
+    - name: Install dnsmasq, apache2
+      ansible.builtin.apt:
+        name:
+          - dnsmasq
+          - apache2
+        state: present
+        update_cache: true
+
+    # ---------- 2. Файлы Ubuntu 24.04 (последний point-release) ----------
+    - name: Get SHA256SUMS of Ubuntu 24.04
+      ansible.builtin.uri:
+        url: "{{ ubuntu_release_url }}/SHA256SUMS"
+        return_content: true
+      register: sums
+
+    - name: Select latest live-server ISO
+      ansible.builtin.set_fact:
+        iso_entry: >-
+          {{ sums.content
+             | regex_findall('([0-9a-f]{64}) \*(ubuntu-24\.04[0-9.]*-live-server-amd64\.iso)')
+             | sort(attribute='1') | last }}
+
+    - name: Set ISO / netboot names
+      ansible.builtin.set_fact:
+        iso_sha256: "{{ iso_entry[0] }}"
+        iso_name: "{{ iso_entry[1] }}"
+        netboot_name: "{{ iso_entry[1] | replace('live-server-amd64.iso', 'netboot-amd64.tar.gz') }}"
+
+    - name: Show selected release
+      ansible.builtin.debug:
+        msg: "ISO: {{ iso_name }} | netboot: {{ netboot_name }}"
+
+    - name: Download netboot tarball
+      ansible.builtin.get_url:
+        url: "{{ ubuntu_release_url }}/{{ netboot_name }}"
+        dest: "{{ tftp_root }}/{{ netboot_name }}"
+        mode: "0644"
+        timeout: 120
+
+    - name: Unpack netboot tarball to {{ tftp_root }}
+      ansible.builtin.unarchive:
+        src: "{{ tftp_root }}/{{ netboot_name }}"
+        dest: "{{ tftp_root }}"
+        remote_src: true
+        creates: "{{ tftp_root }}/amd64/pxelinux.0"
+
+    - name: PXE menu (pxelinux.cfg/default)
+      ansible.builtin.template:
+        src: templates/pxelinux-default.j2
+        dest: "{{ tftp_root }}/amd64/pxelinux.cfg/default"
+        mode: "0644"
+
+    - name: Download live-server ISO (~3 GB, takes a while)
+      ansible.builtin.get_url:
+        url: "{{ ubuntu_release_url }}/{{ iso_name }}"
+        dest: "{{ iso_dir }}/{{ iso_file }}"
+        checksum: "sha256:{{ iso_sha256 }}"
+        mode: "0644"
+        timeout: 300
+
+    # ---------- 3. Autoinstall ----------
+    - name: Autoinstall user-data
+      ansible.builtin.template:
+        src: templates/user-data.j2
+        dest: "{{ ks_dir }}/user-data"
+        mode: "0644"
+
+    - name: Autoinstall meta-data (empty)
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ ks_dir }}/meta-data"
+        mode: "0644"
+
+    # ---------- 4. Web-сервер ----------
+    - name: Apache site ks-server
+      ansible.builtin.template:
+        src: templates/ks-server.conf.j2
+        dest: /etc/apache2/sites-available/ks-server.conf
+        mode: "0644"
+      notify: restart apache2
+
+    - name: Enable ks-server site
+      ansible.builtin.command: a2ensite ks-server.conf
+      args:
+        creates: /etc/apache2/sites-enabled/ks-server.conf
+      notify: restart apache2
+
+    # ---------- 5. Доступ клиента в интернет через сервер (apt при установке) ----------
+    - name: Enable IPv4 forwarding
+      ansible.builtin.copy:
+        content: "net.ipv4.ip_forward = 1\n"
+        dest: /etc/sysctl.d/90-pxe-forward.conf
+        mode: "0644"
+      register: fwd
+
+    - name: Apply sysctl
+      ansible.builtin.command: sysctl -p /etc/sysctl.d/90-pxe-forward.conf
+      changed_when: fwd.changed
+
+    - name: NAT for PXE network
+      ansible.builtin.iptables:
+        table: nat
+        chain: POSTROUTING
+        source: 10.0.0.0/24
+        out_interface: "{{ ansible_default_ipv4.interface }}"
+        jump: MASQUERADE
+
+    # ---------- 6. Службы ----------
+    - name: Enable and start services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - dnsmasq
+        - apache2
